@@ -1,16 +1,16 @@
 import os
 import glob
+import re  # Added for flexible splitting
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 from PIL import Image
 import sys
 import random
-import re
 
 # --- GUI IMPORTS ---
 from PyQt5.QtWidgets import QApplication, QFileDialog, QInputDialog
-from matplotlib.widgets import Slider # NEW IMPORT
+from matplotlib.widgets import Slider
 
 class ImageReviewer:
     def __init__(self):
@@ -41,9 +41,11 @@ class ImageReviewer:
         if not os.path.exists(self.regions_file_path):
             print(f"\nCRITICAL ERROR: Could not find 'Regions.xlsx'")
             print(f"Looking in: {script_dir}")
-            print("Please make sure 'Regions.xlsx' is in the same folder as this script.\n")
             return
 
+        # Load regions once and store them
+        self.target_regions_list = self.load_target_regions()
+        
         # --- PHASE 2: Get Inputs (PyQt5) ---
         self.folder_path, self.rat_name = self.get_user_inputs_qt()
 
@@ -75,26 +77,49 @@ class ImageReviewer:
         try:
             df = pd.read_excel(self.regions_file_path, header=None)
             region_list = df.iloc[:, 0].dropna().astype(str).str.strip().tolist()
+            # Sort by length (longest first) to match specific regions before general ones
+            region_list.sort(key=len, reverse=True)
             return region_list
         except Exception as e:
             print(f"Error reading 'Regions.xlsx': {e}")
             return []
 
-    def find_image_pairs(self):
-        target_regions = self.load_target_regions()
+    # --- NEW HELPER FUNCTION TO REPLACE PARTS[7] ---
+    def extract_metadata(self, filename):
+        """
+        Parses filename to find Region and Hemisphere regardless of position.
+        Returns: (Region, Hemisphere) or (None, None)
+        """
+        name_no_ext = os.path.splitext(filename)[0]
         
-        if not target_regions:
+        # Split by underscore, dash, or space
+        tokens = re.split(r'[_\-\s]+', name_no_ext)
+        
+        # 1. Find Hemisphere
+        hemi = None
+        if "RH" in tokens:
+            hemi = "RH"
+        elif "LH" in tokens:
+            hemi = "LH"
+
+        # 2. Find Region
+        found_region = None
+        for region in self.target_regions_list:
+            # Check if the region string exists exactly in the tokens
+            if region in tokens:
+                found_region = region
+                break
+        
+        return found_region, hemi
+
+    def find_image_pairs(self):
+        if not self.target_regions_list:
             print("CRITICAL ERROR: 'Regions.xlsx' appears to be empty or unreadable.")
             return
 
-        # Sort regions by length (longest first) to prevent partial matches 
-        # (e.g., finding "MO" inside "MOs")
-        target_regions.sort(key=len, reverse=True)
-
         print(f"--- Loaded Target Regions ---")
-        print(f"Targets: {target_regions}")
+        print(f"Targets: {self.target_regions_list}")
 
-        # Search for any TIF file containing the rat name
         search_pattern = os.path.join(self.folder_path, f"*{self.rat_name}*.tif")
         all_tif_files = glob.glob(search_pattern)
         
@@ -104,53 +129,22 @@ class ImageReviewer:
 
         for tif_path in all_tif_files:
             file_name = os.path.basename(tif_path)
-            name_no_ext = os.path.splitext(file_name)[0]
             
-            # --- NEW LOGIC STARTS HERE ---
-            
-            # 1. Check for Rat Name (Case insensitive check optional, currently sensitive)
-            if self.rat_name not in name_no_ext:
+            # --- UPDATED: Use the new helper function ---
+            region, hemisphere = self.extract_metadata(file_name)
+
+            # If we couldn't find a valid region or RH/LH, skip the file
+            if not region or not hemisphere:
                 continue
-
-            # 2. Tokenize: Split filename by Underscore, Dash, or Space
-            # Example: "Rat1_RegionX_RH.tif" -> ['Rat1', 'RegionX', 'RH']
-            tokens = re.split(r'[_\-\s]+', name_no_ext)
-
-            # 3. Find Hemisphere (RH or LH) anywhere in the tokens
-            hemisphere = None
-            if "RH" in tokens:
-                hemisphere = "RH"
-            elif "LH" in tokens:
-                hemisphere = "LH"
-            
-            if not hemisphere:
-                # Skip file if it doesn't have RH or LH
-                continue
-
-            # 4. Find Region
-            # Check if any region from Excel exists in the filename tokens
-            unique_id = None
-            for region in target_regions:
-                # We check if the exact region string is in the tokens list
-                # This ensures "MO" doesn't match "MOs_Image" unless "MO" is its own part
-                if region in tokens:
-                    unique_id = region
-                    break
-            
-            if not unique_id:
-                # Skip file if no known region is found
-                continue
-
-            # --- NEW LOGIC ENDS HERE ---
 
             # Group the files
-            if unique_id not in grouped_files:
-                grouped_files[unique_id] = {'RH': [], 'LH': []}
+            if region not in grouped_files:
+                grouped_files[region] = {'RH': [], 'LH': []}
             
             if hemisphere == "RH":
-                grouped_files[unique_id]['RH'].append(tif_path)
+                grouped_files[region]['RH'].append(tif_path)
             elif hemisphere == "LH":
-                grouped_files[unique_id]['LH'].append(tif_path)
+                grouped_files[region]['LH'].append(tif_path)
 
         selected_tif_files = []
         
@@ -171,7 +165,6 @@ class ImageReviewer:
         self.valid_pairs = []
         for tif_path in selected_tif_files:
             base_name = os.path.splitext(tif_path)[0]
-            # Try finding the matching object prediction file
             jpg_path_guess_1 = f"{base_name}_Object Predictions.jpeg"
             jpg_path_guess_2 = f"{base_name}_Object Predictions.jpg"
             
@@ -198,7 +191,6 @@ class ImageReviewer:
         try:
             # Load Images
             tif_img = Image.open(tif_path).convert('RGB')
-            # Store ORIGINAL array for resetting contrast
             self.original_tif_arr = np.array(tif_img)
             
             jpg_img = Image.open(jpg_path).convert('L')
@@ -214,11 +206,9 @@ class ImageReviewer:
             return
 
         # Setup Plot Layout
-        # We turn off constrained_layout to manually place sliders
         layout = [['overlap', 'jpeg'], ['overlap', 'tif']]
         self.fig, self.ax_dict = plt.subplot_mosaic(layout, figsize=(15, 9))
         
-        # Make space at the bottom for sliders
         plt.subplots_adjust(left=0.05, right=0.95, top=0.9, bottom=0.20, wspace=0.2, hspace=0.2)
         
         manager = plt.get_current_fig_manager()
@@ -227,12 +217,12 @@ class ImageReviewer:
 
         self.fig.canvas.manager.set_window_title(f"Image {self.current_index + 1}/{len(self.valid_pairs)}: {file_name}")
 
-        clean_name = os.path.splitext(file_name)[0]
-        region_name = clean_name.split('_')[7]
-        hemi_name = clean_name.split('_')[8]
+        # --- UPDATED: Get Title Info safely ---
+        region_name, hemi_name = self.extract_metadata(file_name)
+        if not region_name: region_name = "Unknown"
+        if not hemi_name: hemi_name = "??"
 
         # --- IMAGE PLOTS ---
-        # We save the image objects (im_overlap, im_tif) to update them later
         self.im_overlap = self.ax_dict['overlap'].imshow(self.original_tif_arr)
         self.ax_dict['overlap'].contour(jpg_arr_gray, levels=[127], colors='red', linewidths=.75)
         
@@ -253,7 +243,6 @@ class ImageReviewer:
         self.ax_dict['tif'].axis('off')
 
         # --- SLIDERS ---
-        # Position: [left, bottom, width, height]
         ax_contrast = plt.axes([0.25, 0.08, 0.5, 0.03])
         ax_brightness = plt.axes([0.25, 0.04, 0.5, 0.03])
 
@@ -269,18 +258,11 @@ class ImageReviewer:
         plt.show()
 
     def update_image_display(self, val):
-        # Formula: new = old * contrast + brightness
         c = self.s_contrast.val
         b = self.s_brightness.val
-        
-        # Convert to float to avoid overflow during math
         temp_img = self.original_tif_arr.astype(float)
         temp_img = temp_img * c + b
-        
-        # Clip to valid 0-255 range and convert back to uint8
         temp_img = np.clip(temp_img, 0, 255).astype(np.uint8)
-        
-        # Update both plots
         self.im_overlap.set_data(temp_img)
         self.im_tif.set_data(temp_img)
         self.fig.canvas.draw_idle()
@@ -299,18 +281,14 @@ class ImageReviewer:
         new_ylim = [center_y + new_height * (1-rely), center_y - new_height * rely]
 
         for key, ax in self.ax_dict.items():
-            # Don't zoom sliders accidentally
             if key in ['overlap', 'jpeg', 'tif']:
                 ax.set_xlim(new_xlim)
                 ax.set_ylim(new_ylim)
-        
         self.fig.canvas.draw_idle()
 
     def on_scroll(self, event):
         if event.inaxes is None: return
-        # Ignore scrolls on slider axes
         if event.inaxes not in self.ax_dict.values(): return 
-        
         base_scale = 1.2
         scale_factor = 1 / base_scale if event.button == 'up' else base_scale
         self.apply_zoom(scale_factor, event.xdata, event.ydata, event.inaxes)
@@ -320,10 +298,11 @@ class ImageReviewer:
             score = self.score_mapping[event.key]
             current_file = os.path.basename(self.valid_pairs[self.current_index][0])
             
-            clean_name = os.path.splitext(current_file)[0]
-            parts = clean_name.split("_")
-            region_str = parts[7]
-            hemi_str = parts[8]
+            # --- UPDATED: Use the new helper function ---
+            region_str, hemi_str = self.extract_metadata(current_file)
+            
+            if not region_str: region_str = "Unknown"
+            if not hemi_str: hemi_str = "Unknown"
 
             print(f"Scored {score} for {current_file}")
             
@@ -351,7 +330,6 @@ class ImageReviewer:
         elif event.key in ['i', 'o']:
             base_scale = 1.2
             scale_factor = 1 / base_scale if event.key == 'i' else base_scale
-
             if event.inaxes and event.inaxes in self.ax_dict.values():
                 center_x, center_y = event.xdata, event.ydata
                 ref_ax = event.inaxes
@@ -361,22 +339,17 @@ class ImageReviewer:
                 ylim = ref_ax.get_ylim()
                 center_x = (xlim[0] + xlim[1]) / 2
                 center_y = (ylim[0] + ylim[1]) / 2
-
             self.apply_zoom(scale_factor, center_x, center_y, ref_ax)
 
     def reset_view(self):
-        # 1. Reset Zoom
         default_xlim = (-0.5, self.img_width - 0.5)
         default_ylim = (self.img_height - 0.5, -0.5)
         for key, ax in self.ax_dict.items():
             if key in ['overlap', 'jpeg', 'tif']:
                 ax.set_xlim(default_xlim)
                 ax.set_ylim(default_ylim)
-        
-        # 2. Reset Sliders
         self.s_contrast.reset()
         self.s_brightness.reset()
-        
         self.fig.canvas.draw_idle()
 
     def save_progress(self):
