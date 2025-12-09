@@ -7,21 +7,43 @@ from PIL import Image
 import sys
 import random
 
-# --- GUI IMPORTS (PyQt5) ---
+# --- GUI IMPORTS ---
 from PyQt5.QtWidgets import QApplication, QFileDialog, QInputDialog
+from matplotlib.widgets import Slider # NEW IMPORT
 
 class ImageReviewer:
     def __init__(self):
         self.results = []
         self.current_index = 0
-        self.score_mapping = {'1': -2, '2': -1, '3': 0, '4': 1, '5': 2}
         
-        # Store current image dimensions for Reset functionality
+        self.score_mapping = {
+            '1': -2, 
+            '2': -1, 
+            '3': 0, 
+            '4': 1, 
+            '5': 2,
+            '6': 'DISCARD'
+        }
+        
         self.img_height = 0
         self.img_width = 0
         self.ax_dict = {} 
 
-        # --- PHASE 1: Get Inputs (PyQt5) ---
+        # --- PHASE 1: Locate Regions File Automatically ---
+        if getattr(sys, 'frozen', False):
+            script_dir = os.path.dirname(sys.executable)
+        else:
+            script_dir = os.path.dirname(os.path.abspath(__file__))
+            
+        self.regions_file_path = os.path.join(script_dir, "Regions.xlsx")
+
+        if not os.path.exists(self.regions_file_path):
+            print(f"\nCRITICAL ERROR: Could not find 'Regions.xlsx'")
+            print(f"Looking in: {script_dir}")
+            print("Please make sure 'Regions.xlsx' is in the same folder as this script.\n")
+            return
+
+        # --- PHASE 2: Get Inputs (PyQt5) ---
         self.folder_path, self.rat_name = self.get_user_inputs_qt()
 
         if not self.folder_path or not self.rat_name:
@@ -30,7 +52,7 @@ class ImageReviewer:
 
         self.output_path = os.path.join(self.folder_path, f"{self.rat_name}_QC_Scores.xlsx")
 
-        # --- PHASE 2: Start Review ---
+        # --- PHASE 3: Start Review ---
         self.find_image_pairs()
 
     @staticmethod
@@ -39,7 +61,7 @@ class ImageReviewer:
         if not app:
             app = QApplication(sys.argv)
         
-        print("Please select the folder in the dialog window...")
+        print("Please select the Image Folder in the pop-up...")
         folder_path = QFileDialog.getExistingDirectory(None, "Select Image Folder")
         if not folder_path: return None, None
         
@@ -48,37 +70,43 @@ class ImageReviewer:
         
         return folder_path, rat_name
 
-    def find_image_pairs(self):
-        # 1. Define Target Regions (Whitelist)
-        target_regions = ['PrL', 'CA3', 'CA1', 'ACC', 'DG']
-        print(f"Targeting ONLY these regions: {target_regions}")
+    def load_target_regions(self):
+        try:
+            df = pd.read_excel(self.regions_file_path, header=None)
+            region_list = df.iloc[:, 0].dropna().astype(str).str.strip().tolist()
+            return region_list
+        except Exception as e:
+            print(f"Error reading 'Regions.xlsx': {e}")
+            return []
 
-        # 2. Scan for all TIF files
+    def find_image_pairs(self):
+        target_regions = self.load_target_regions()
+        
+        if not target_regions:
+            print("CRITICAL ERROR: 'Regions.xlsx' appears to be empty or unreadable.")
+            return
+
+        print(f"--- Loaded Target Regions ---")
+        print(f"Targets: {target_regions}")
+
         search_pattern = os.path.join(self.folder_path, f"*{self.rat_name}*.tif")
         all_tif_files = glob.glob(search_pattern)
         
         print(f"Scanning {self.folder_path}...")
-        print(f"Found total {len(all_tif_files)} files initially. Filtering now...")
-
-        # --- Filtering Logic ---
+        
         grouped_files = {}
 
         for tif_path in all_tif_files:
             file_name = os.path.basename(tif_path)
-            
-            # Remove extension to ensure clean splitting
             name_no_ext = os.path.splitext(file_name)[0]
             parts = name_no_ext.split("_")
             
-            # Safety check: Ensure filename has enough parts
             if len(parts) <= 8:
                 continue
 
-            # Extract Metadata
-            unique_id = parts[7]  # Region (e.g., PrL, CA1)
-            hemisphere = parts[8] # Hemisphere (LH or RH)
+            unique_id = parts[7]  
+            hemisphere = parts[8] 
 
-            # Filter: Skip if not in target regions
             if unique_id not in target_regions:
                 continue
 
@@ -90,32 +118,23 @@ class ImageReviewer:
             elif hemisphere == "LH":
                 grouped_files[unique_id]['LH'].append(tif_path)
 
-        # 3. Random Sampling (2 RH + 2 LH per region)
         selected_tif_files = []
         
-        print("\n--- Selection Summary ---")
-        if not grouped_files:
-            print("WARNING: No images matched the target regions. Check filenames.")
-
         for uid, data in grouped_files.items():
             rh_list = data['RH']
             lh_list = data['LH']
             
-            count_rh = min(len(rh_list), 1)
+            count_rh = min(len(rh_list), 1) 
             count_lh = min(len(lh_list), 1)
-            
-            print(f"Region [{uid}]: Selecting {count_rh} RH and {count_lh} LH images.")
             
             if count_rh > 0:
                 selected_tif_files.extend(random.sample(rh_list, count_rh))
             if count_lh > 0:
                 selected_tif_files.extend(random.sample(lh_list, count_lh))
         
-        print(f"--- Total images selected for review: {len(selected_tif_files)} ---\n")
+        print(f"--- Total images selected: {len(selected_tif_files)} ---\n")
         
-        # 4. Pair with Prediction Images
         self.valid_pairs = []
-        
         for tif_path in selected_tif_files:
             base_name = os.path.splitext(tif_path)[0]
             jpg_path_guess_1 = f"{base_name}_Object Predictions.jpeg"
@@ -126,7 +145,6 @@ class ImageReviewer:
             elif os.path.exists(jpg_path_guess_2): final_jpg_path = jpg_path_guess_2
             
             if final_jpg_path: self.valid_pairs.append((tif_path, final_jpg_path))
-            else: print(f"Warning: No prediction JPEG found for {os.path.basename(tif_path)}")
 
         if self.valid_pairs: 
             self.show_next_image()
@@ -145,14 +163,15 @@ class ImageReviewer:
         try:
             # Load Images
             tif_img = Image.open(tif_path).convert('RGB')
-            tif_arr = np.array(tif_img)
+            # Store ORIGINAL array for resetting contrast
+            self.original_tif_arr = np.array(tif_img)
             
             jpg_img = Image.open(jpg_path).convert('L')
             if jpg_img.size != tif_img.size: 
                 jpg_img = jpg_img.resize(tif_img.size, Image.NEAREST)
             jpg_arr_gray = np.array(jpg_img)
             
-            self.img_height, self.img_width = tif_arr.shape[:2]
+            self.img_height, self.img_width = self.original_tif_arr.shape[:2]
         except Exception as e:
             print(f"Error loading {file_name}: {e}")
             self.current_index += 1
@@ -160,48 +179,76 @@ class ImageReviewer:
             return
 
         # Setup Plot Layout
+        # We turn off constrained_layout to manually place sliders
         layout = [['overlap', 'jpeg'], ['overlap', 'tif']]
-        self.fig, self.ax_dict = plt.subplot_mosaic(layout, figsize=(15, 9), constrained_layout=True)
+        self.fig, self.ax_dict = plt.subplot_mosaic(layout, figsize=(15, 9))
         
-        # Maximize Window
+        # Make space at the bottom for sliders
+        plt.subplots_adjust(left=0.05, right=0.95, top=0.9, bottom=0.20, wspace=0.2, hspace=0.2)
+        
         manager = plt.get_current_fig_manager()
         try: manager.window.showMaximized()
         except: pass
 
         self.fig.canvas.manager.set_window_title(f"Image {self.current_index + 1}/{len(self.valid_pairs)}: {file_name}")
 
-        # Extract Region info for display
         clean_name = os.path.splitext(file_name)[0]
         region_name = clean_name.split('_')[7]
         hemi_name = clean_name.split('_')[8]
 
-        # --- MAIN OVERLAP PLOT ---
-        self.ax_dict['overlap'].imshow(tif_arr)
+        # --- IMAGE PLOTS ---
+        # We save the image objects (im_overlap, im_tif) to update them later
+        self.im_overlap = self.ax_dict['overlap'].imshow(self.original_tif_arr)
         self.ax_dict['overlap'].contour(jpg_arr_gray, levels=[127], colors='red', linewidths=.75)
         
-        # Detailed Title with Scores
         title_text = (
             f"Region: {region_name} ({hemi_name})\n"
-            f"SCORES: [1 = -2]  [2 = -1]  [3 = 0]  [4 = +1]  [5 = +2]\n"
-            f"CONTROLS: Scroll or i/o = Zoom | 'r' = Reset"
+            f"SCORES: [1 = -2] [2 = -1] [3 = 0] [4 = +1] [5 = +2] [6 = DISCARD]\n"
+            f"CONTROLS: Scroll=Zoom | 'r'=Reset | Sliders=Adjust"
         )
-        
         self.ax_dict['overlap'].set_title(title_text, fontsize=12, color='blue', fontweight='bold')
         self.ax_dict['overlap'].axis('off')
 
-        # --- SUBPLOTS ---
         self.ax_dict['jpeg'].imshow(jpg_arr_gray, cmap='gray')
         self.ax_dict['jpeg'].set_title("Prediction Mask", fontsize=10)
         self.ax_dict['jpeg'].axis('off')
 
-        self.ax_dict['tif'].imshow(tif_arr)
-        self.ax_dict['tif'].set_title("Original TIF", fontsize=10)
+        self.im_tif = self.ax_dict['tif'].imshow(self.original_tif_arr)
+        self.ax_dict['tif'].set_title("Original TIF (Adjustable)", fontsize=10)
         self.ax_dict['tif'].axis('off')
+
+        # --- SLIDERS ---
+        # Position: [left, bottom, width, height]
+        ax_contrast = plt.axes([0.25, 0.08, 0.5, 0.03])
+        ax_brightness = plt.axes([0.25, 0.04, 0.5, 0.03])
+
+        self.s_contrast = Slider(ax_contrast, 'Contrast', 0.1, 3.0, valinit=1.0)
+        self.s_brightness = Slider(ax_brightness, 'Brightness', -100, 100, valinit=0)
+
+        self.s_contrast.on_changed(self.update_image_display)
+        self.s_brightness.on_changed(self.update_image_display)
 
         # Connect Events
         self.fig.canvas.mpl_connect('key_press_event', self.on_key_press)
         self.fig.canvas.mpl_connect('scroll_event', self.on_scroll)
         plt.show()
+
+    def update_image_display(self, val):
+        # Formula: new = old * contrast + brightness
+        c = self.s_contrast.val
+        b = self.s_brightness.val
+        
+        # Convert to float to avoid overflow during math
+        temp_img = self.original_tif_arr.astype(float)
+        temp_img = temp_img * c + b
+        
+        # Clip to valid 0-255 range and convert back to uint8
+        temp_img = np.clip(temp_img, 0, 255).astype(np.uint8)
+        
+        # Update both plots
+        self.im_overlap.set_data(temp_img)
+        self.im_tif.set_data(temp_img)
+        self.fig.canvas.draw_idle()
 
     def apply_zoom(self, scale_factor, center_x, center_y, ref_ax):
         cur_xlim = ref_ax.get_xlim()
@@ -216,25 +263,28 @@ class ImageReviewer:
         new_xlim = [center_x - new_width * (1-relx), center_x + new_width * relx]
         new_ylim = [center_y + new_height * (1-rely), center_y - new_height * rely]
 
-        for ax in self.ax_dict.values():
-            ax.set_xlim(new_xlim)
-            ax.set_ylim(new_ylim)
+        for key, ax in self.ax_dict.items():
+            # Don't zoom sliders accidentally
+            if key in ['overlap', 'jpeg', 'tif']:
+                ax.set_xlim(new_xlim)
+                ax.set_ylim(new_ylim)
         
         self.fig.canvas.draw_idle()
 
     def on_scroll(self, event):
         if event.inaxes is None: return
+        # Ignore scrolls on slider axes
+        if event.inaxes not in self.ax_dict.values(): return 
+        
         base_scale = 1.2
         scale_factor = 1 / base_scale if event.button == 'up' else base_scale
         self.apply_zoom(scale_factor, event.xdata, event.ydata, event.inaxes)
 
     def on_key_press(self, event):
-        # 1. Scoring Logic
         if event.key in self.score_mapping:
             score = self.score_mapping[event.key]
             current_file = os.path.basename(self.valid_pairs[self.current_index][0])
             
-            # Extract metadata for Excel
             clean_name = os.path.splitext(current_file)[0]
             parts = clean_name.split("_")
             region_str = parts[7]
@@ -245,8 +295,8 @@ class ImageReviewer:
             self.results.append({
                 'Filename': current_file, 
                 'Rat_ID': self.rat_name,
-                'Region': region_str,     # Added to Excel
-                'Hemisphere': hemi_str,   # Added to Excel
+                'Region': region_str,
+                'Hemisphere': hemi_str,
                 'Score': score, 
                 'Raw_Input': event.key
             })
@@ -256,24 +306,18 @@ class ImageReviewer:
             self.current_index += 1
             self.show_next_image()
 
-        # 2. Exit
         elif event.key == 'escape':
             print("Stopped by user.")
             plt.close(self.fig)
 
-        # 3. Reset View
         elif event.key == 'r':
             self.reset_view()
 
-        # 4. Keyboard Zoom (i/o)
         elif event.key in ['i', 'o']:
             base_scale = 1.2
-            if event.key == 'i': # In
-                scale_factor = 1 / base_scale
-            else: # Out
-                scale_factor = base_scale
+            scale_factor = 1 / base_scale if event.key == 'i' else base_scale
 
-            if event.inaxes:
+            if event.inaxes and event.inaxes in self.ax_dict.values():
                 center_x, center_y = event.xdata, event.ydata
                 ref_ax = event.inaxes
             else:
@@ -286,17 +330,23 @@ class ImageReviewer:
             self.apply_zoom(scale_factor, center_x, center_y, ref_ax)
 
     def reset_view(self):
+        # 1. Reset Zoom
         default_xlim = (-0.5, self.img_width - 0.5)
         default_ylim = (self.img_height - 0.5, -0.5)
-        for ax in self.ax_dict.values():
-            ax.set_xlim(default_xlim)
-            ax.set_ylim(default_ylim)
+        for key, ax in self.ax_dict.items():
+            if key in ['overlap', 'jpeg', 'tif']:
+                ax.set_xlim(default_xlim)
+                ax.set_ylim(default_ylim)
+        
+        # 2. Reset Sliders
+        self.s_contrast.reset()
+        self.s_brightness.reset()
+        
         self.fig.canvas.draw_idle()
 
     def save_progress(self):
         if not self.results: return
         try: 
-            # Reorder columns for better readability
             df = pd.DataFrame(self.results)
             cols = ['Filename', 'Rat_ID', 'Region', 'Hemisphere', 'Score', 'Raw_Input']
             df = df[cols]
