@@ -6,6 +6,7 @@ import pandas as pd
 from PIL import Image
 import sys
 import random
+import re
 
 # --- GUI IMPORTS ---
 from PyQt5.QtWidgets import QApplication, QFileDialog, QInputDialog
@@ -86,9 +87,14 @@ class ImageReviewer:
             print("CRITICAL ERROR: 'Regions.xlsx' appears to be empty or unreadable.")
             return
 
+        # Sort regions by length (longest first) to prevent partial matches 
+        # (e.g., finding "MO" inside "MOs")
+        target_regions.sort(key=len, reverse=True)
+
         print(f"--- Loaded Target Regions ---")
         print(f"Targets: {target_regions}")
 
+        # Search for any TIF file containing the rat name
         search_pattern = os.path.join(self.folder_path, f"*{self.rat_name}*.tif")
         all_tif_files = glob.glob(search_pattern)
         
@@ -99,17 +105,45 @@ class ImageReviewer:
         for tif_path in all_tif_files:
             file_name = os.path.basename(tif_path)
             name_no_ext = os.path.splitext(file_name)[0]
-            parts = name_no_ext.split("_")
             
-            if len(parts) <= 8:
+            # --- NEW LOGIC STARTS HERE ---
+            
+            # 1. Check for Rat Name (Case insensitive check optional, currently sensitive)
+            if self.rat_name not in name_no_ext:
                 continue
 
-            unique_id = parts[7]  
-            hemisphere = parts[8] 
+            # 2. Tokenize: Split filename by Underscore, Dash, or Space
+            # Example: "Rat1_RegionX_RH.tif" -> ['Rat1', 'RegionX', 'RH']
+            tokens = re.split(r'[_\-\s]+', name_no_ext)
 
-            if unique_id not in target_regions:
+            # 3. Find Hemisphere (RH or LH) anywhere in the tokens
+            hemisphere = None
+            if "RH" in tokens:
+                hemisphere = "RH"
+            elif "LH" in tokens:
+                hemisphere = "LH"
+            
+            if not hemisphere:
+                # Skip file if it doesn't have RH or LH
                 continue
 
+            # 4. Find Region
+            # Check if any region from Excel exists in the filename tokens
+            unique_id = None
+            for region in target_regions:
+                # We check if the exact region string is in the tokens list
+                # This ensures "MO" doesn't match "MOs_Image" unless "MO" is its own part
+                if region in tokens:
+                    unique_id = region
+                    break
+            
+            if not unique_id:
+                # Skip file if no known region is found
+                continue
+
+            # --- NEW LOGIC ENDS HERE ---
+
+            # Group the files
             if unique_id not in grouped_files:
                 grouped_files[unique_id] = {'RH': [], 'LH': []}
             
@@ -137,6 +171,7 @@ class ImageReviewer:
         self.valid_pairs = []
         for tif_path in selected_tif_files:
             base_name = os.path.splitext(tif_path)[0]
+            # Try finding the matching object prediction file
             jpg_path_guess_1 = f"{base_name}_Object Predictions.jpeg"
             jpg_path_guess_2 = f"{base_name}_Object Predictions.jpg"
             
