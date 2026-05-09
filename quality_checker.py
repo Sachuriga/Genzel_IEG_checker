@@ -15,7 +15,7 @@ from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QHBoxLayout, QVBoxLayout,
     QListWidget, QListWidgetItem, QLabel, QComboBox, QFileDialog,
     QInputDialog, QSlider, QGroupBox, QSizePolicy, QAbstractItemView,
-    QDialog, QPushButton, QLineEdit, QSpinBox, QDialogButtonBox,
+    QDialog, QPushButton, QLineEdit, QSpinBox, QDialogButtonBox, QMessageBox,
 )
 from PyQt5.QtCore import Qt, QTimer
 from PyQt5.QtGui import QFont, QColor, QBrush
@@ -514,6 +514,22 @@ class ReviewerWindow(QMainWindow):
         if self.current_tif_path is None:
             return
         fname = os.path.basename(self.current_tif_path)
+        existing_idx = next(
+            (i for i, r in enumerate(self.results) if r['Filename'] == fname), None
+        )
+        if existing_idx is not None:
+            old_score = self.results[existing_idx]['Score']
+            reply = QMessageBox.question(
+                self,
+                "Image Already Scored",
+                f'"{fname}" was already scored as {old_score}.\n\n'
+                f'Overwrite with new score {score}?',
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            )
+            if reply != QMessageBox.Yes:
+                return
+            self.results.pop(existing_idx)
         region, hemi = self.extract_metadata(fname)
         self.results.append({
             'Filename':   fname,
