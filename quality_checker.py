@@ -361,7 +361,12 @@ class ReviewerWindow(QMainWindow):
             # Map pixel values to the red channel so the display matches
             # the Red LUT used by ImageJ/FIJI.
             if tif_raw.mode in ('L', 'I', 'F', 'P') or ';' in tif_raw.mode:
-                gray = np.array(tif_raw.convert('L'))
+                raw = np.array(tif_raw).astype(np.float32)
+                lo, hi = raw.min(), raw.max()
+                if hi > lo:
+                    gray = ((raw - lo) / (hi - lo) * 255).astype(np.uint8)
+                else:
+                    gray = np.zeros_like(raw, dtype=np.uint8)
                 rgb = np.zeros((gray.shape[0], gray.shape[1], 3), dtype=np.uint8)
                 rgb[:, :, 0] = gray
                 self.original_tif_arr = rgb
