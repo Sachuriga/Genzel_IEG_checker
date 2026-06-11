@@ -15,7 +15,7 @@ from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QHBoxLayout, QVBoxLayout,
     QListWidget, QListWidgetItem, QLabel, QComboBox, QFileDialog,
     QInputDialog, QSlider, QGroupBox, QSizePolicy, QAbstractItemView,
-    QDialog, QPushButton, QLineEdit, QSpinBox, QDialogButtonBox, QMessageBox,
+    QDialog, QLineEdit, QSpinBox, QDialogButtonBox, QMessageBox,
 )
 from PyQt5.QtCore import Qt, QTimer
 from PyQt5.QtGui import QFont, QColor, QBrush
@@ -30,8 +30,8 @@ MASK_COLORS = {
     'Red':    (255, 0, 0),
 }
 
-LIST_COLOR_RANDOM = QColor('#c8e6c9')   # light green — randomly selected
-LIST_COLOR_SCORED = QColor('#bbdefb')   # light blue  — already scored
+LIST_COLOR_RANDOM = QColor('#c8e6c9')
+LIST_COLOR_SCORED = QColor('#bbdefb')
 
 
 # ------------------------------------------------------------------ #
@@ -39,11 +39,6 @@ LIST_COLOR_SCORED = QColor('#bbdefb')   # light blue  — already scored
 # ------------------------------------------------------------------ #
 
 def detect_rat_names(folder_path):
-    """Scan TIF filenames and return tokens that look like animal IDs.
-
-    Pattern: 1-8 letters followed by 4+ digits (e.g. Rat461707, Mouse2345).
-    Results are sorted by number of files they appear in (most common first).
-    """
     tif_files = glob.glob(os.path.join(folder_path, "*.tif"))
     animal_re = re.compile(r'^[A-Za-z]{1,8}\d{4,}[A-Za-z0-9]*$')
     counts: Counter = Counter()
@@ -56,7 +51,6 @@ def detect_rat_names(folder_path):
 
 
 def _folder_tokens(folder_path, rat_name):
-    """Return set of all underscore-split tokens from TIF filenames in folder."""
     tokens = set()
     for p in glob.glob(os.path.join(folder_path, f"*{rat_name}*.tif")):
         name = os.path.splitext(os.path.basename(p))[0]
@@ -65,16 +59,12 @@ def _folder_tokens(folder_path, rat_name):
 
 
 class RatSelectionDialog(QDialog):
-    """Pop-up that lists detected animal names and lets the user pick or type one."""
-
     def __init__(self, rat_names, parent=None):
         super().__init__(parent)
         self.setWindowTitle("Select Animal")
         self.setMinimumWidth(400)
         layout = QVBoxLayout(self)
-
         layout.addWidget(QLabel("Detected animals in folder — select one or type a name below:"))
-
         self.list_widget = QListWidget()
         for name in rat_names:
             self.list_widget.addItem(name)
@@ -83,11 +73,9 @@ class RatSelectionDialog(QDialog):
         self.list_widget.currentTextChanged.connect(self._sync_edit)
         self.list_widget.itemDoubleClicked.connect(self.accept)
         layout.addWidget(self.list_widget)
-
         layout.addWidget(QLabel("Animal name:"))
         self.name_edit = QLineEdit(rat_names[0] if rat_names else "")
         layout.addWidget(self.name_edit)
-
         btns = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
         btns.accepted.connect(self.accept)
         btns.rejected.connect(self.reject)
@@ -101,7 +89,77 @@ class RatSelectionDialog(QDialog):
 
 
 # ------------------------------------------------------------------ #
-#  Main reviewer window                                                #
+#  Single-panel image window                                           #
+# ------------------------------------------------------------------ #
+
+class ImageViewWindow(QMainWindow):
+    """One floating window showing a single image panel."""
+
+    def __init__(self, title, img_arr, on_key_cb, cmap=None):
+        super().__init__()
+        self.setWindowTitle(title)
+        self.figure = Figure(tight_layout=True)
+        self.canvas = FigureCanvas(self.figure)
+        self.canvas.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+        self.canvas.setFocusPolicy(Qt.StrongFocus)
+        self.setCentralWidget(self.canvas)
+        self.ax = self.figure.add_axes([0, 0, 1, 1])
+        self.ax.axis('off')
+        self.im = self.ax.imshow(img_arr, cmap=cmap, aspect='equal')
+        self.img_height, self.img_width = img_arr.shape[:2]
+        self.canvas.mpl_connect('key_press_event', on_key_cb)
+        self.canvas.mpl_connect('scroll_event', self._on_scroll)
+        self.canvas.draw()
+
+    def update_data(self, img_arr):
+        self.im.set_data(img_arr)
+        self.canvas.draw_idle()
+
+    def apply_zoom(self, scale, cx, cy):
+        xl, yl = self.ax.get_xlim(), self.ax.get_ylim()
+        new_w = (xl[1] - xl[0]) * scale
+        new_h = (yl[0] - yl[1]) * scale
+        relx = (xl[1] - cx) / (xl[1] - xl[0])
+        rely = (yl[0] - cy) / (yl[0] - yl[1])
+        self.ax.set_xlim([cx - new_w * (1 - relx), cx + new_w * relx])
+        self.ax.set_ylim([cy + new_h * (1 - rely), cy - new_h * rely])
+        self.canvas.draw_idle()
+
+    def reset_zoom(self):
+        self.ax.set_xlim(-0.5, self.img_width - 0.5)
+        self.ax.set_ylim(self.img_height - 0.5, -0.5)
+        self.canvas.draw_idle()
+
+    def _on_scroll(self, event):
+        if event.inaxes != self.ax:
+            return
+        scale = 1 / 1.2 if event.button == 'up' else 1.2
+        self.apply_zoom(scale, event.xdata, event.ydata)
+
+
+# ------------------------------------------------------------------ #
+#  Helpers                                                             #
+# ------------------------------------------------------------------ #
+
+def _make_range_row(label_text, lo_slider, lo_lbl, hi_slider, hi_lbl):
+    """Build a two-row QVBoxLayout for a Lo/Hi slider pair."""
+    box = QVBoxLayout()
+    box.addWidget(QLabel(label_text))
+    row_lo = QHBoxLayout()
+    row_lo.addWidget(QLabel("Lo:"))
+    row_lo.addWidget(lo_slider)
+    row_lo.addWidget(lo_lbl)
+    box.addLayout(row_lo)
+    row_hi = QHBoxLayout()
+    row_hi.addWidget(QLabel("Hi:"))
+    row_hi.addWidget(hi_slider)
+    row_hi.addWidget(hi_lbl)
+    box.addLayout(row_hi)
+    return box
+
+
+# ------------------------------------------------------------------ #
+#  Main reviewer window (list + controls)                              #
 # ------------------------------------------------------------------ #
 
 class ReviewerWindow(QMainWindow):
@@ -111,10 +169,7 @@ class ReviewerWindow(QMainWindow):
         self.rat_name = rat_name
         self.output_path = os.path.join(folder_path, f"{rat_name}_QC_Scores.xlsx")
 
-        # cfos (second channel) state
         self.cfos_folder = cfos_folder
-        self.cfos_arr = None        # uint8 gray array for current image
-        self.im_merge = None        # matplotlib AxesImage for merge panel
         self.main_channel_token = None
         self.cfos_channel_token = None
         if cfos_folder:
@@ -122,16 +177,21 @@ class ReviewerWindow(QMainWindow):
 
         self.results = []
         self.current_tif_path = None
-        self.original_tif_arr = None
-        self.contour_mask = None    # raw binary prediction mask
-        self.border_mask = None     # derived mask used for overlay (outline or area)
+
+        # raw float32 pixel arrays (unnormalized)
+        self.tdt_raw: np.ndarray | None = None
+        self.cfos_raw: np.ndarray | None = None
+        self.tdt_raw_min = self.tdt_raw_max = 0
+        self.cfos_raw_min = self.cfos_raw_max = 0
+
+        self.contour_mask = None
+        self.border_mask = None
         self.jpg_arr_gray = None
         self.img_height = self.img_width = 0
         self.mask_color = MASK_COLORS['Green']
-        self.ax_dict = {}
-        self.im_overlap = self.im_jpeg = self.im_tif = None
 
-        # Debounce: only redraw 50 ms after the last slider tick
+        self.img_wins: dict[str, ImageViewWindow] = {}
+
         self._slider_timer = QTimer()
         self._slider_timer.setSingleShot(True)
         self._slider_timer.timeout.connect(self._apply_adjustments)
@@ -145,7 +205,9 @@ class ReviewerWindow(QMainWindow):
         self._build_ui()
         self._populate_list()
         self.setWindowTitle(f"IEG Quality Checker — {rat_name}")
-        self.showMaximized()
+        screen = QApplication.primaryScreen().availableGeometry()
+        self.resize(screen.width() // 2, screen.height() // 2)
+        self.show()
         self._advance_to_next_unscored()
 
     # ------------------------------------------------------------------ #
@@ -194,18 +256,15 @@ class ReviewerWindow(QMainWindow):
         return selected
 
     def _detect_channel_tokens(self):
-        """Find the unique channel token in each folder by diffing their token sets."""
         main_tokens = _folder_tokens(self.folder_path, self.rat_name)
         cfos_tokens = _folder_tokens(self.cfos_folder, self.rat_name)
         main_unique = main_tokens - cfos_tokens
         cfos_unique = cfos_tokens - main_tokens
-        # Pick the longest unique token as the channel name (avoids short noise tokens)
         self.main_channel_token = max(main_unique, key=len) if main_unique else None
         self.cfos_channel_token = max(cfos_unique, key=len) if cfos_unique else None
-        print(f"Channel tokens detected — main: {self.main_channel_token!r}, cfos: {self.cfos_channel_token!r}")
+        print(f"Channel tokens — main: {self.main_channel_token!r}, cfos: {self.cfos_channel_token!r}")
 
     def _find_cfos_tif(self, tif_path):
-        """Return the matching cfos TIF path, or None if not found."""
         if not self.cfos_folder or not self.main_channel_token or not self.cfos_channel_token:
             return None
         fname = os.path.basename(tif_path)
@@ -214,14 +273,35 @@ class ReviewerWindow(QMainWindow):
         return cfos_path if os.path.exists(cfos_path) else None
 
     @staticmethod
-    def _load_tif_as_gray_norm(path):
-        """Load a TIF and return a uint8 grayscale array normalized to 0-255."""
-        raw_img = Image.open(path)
-        raw = np.array(raw_img).astype(np.float32)
-        lo, hi = raw.min(), raw.max()
-        if hi > lo:
-            return ((raw - lo) / (hi - lo) * 255).astype(np.uint8)
-        return np.zeros(raw.shape[:2], dtype=np.uint8)
+    def _load_raw(path):
+        """Load a TIF and return a float32 2-D grayscale array (raw pixel values)."""
+        img = Image.open(path)
+        arr = np.array(img).astype(np.float32)
+        if arr.ndim == 3:
+            arr = arr.mean(axis=2)
+        return arr
+
+    # ------------------------------------------------------------------ #
+    #  Normalization using current Lo/Hi sliders                           #
+    # ------------------------------------------------------------------ #
+
+    def _norm_tdt(self) -> np.ndarray:
+        """Return uint8 gray (H,W) for tdTomato using current Lo/Hi."""
+        lo = self.s_tdt_lo.value()
+        hi = self.s_tdt_hi.value()
+        if hi <= lo:
+            return np.zeros((self.img_height, self.img_width), dtype=np.uint8)
+        return np.clip((self.tdt_raw - lo) / (hi - lo) * 255, 0, 255).astype(np.uint8)
+
+    def _norm_cfos(self) -> np.ndarray | None:
+        """Return uint8 gray (H,W) for cfos using current Lo/Hi, or None."""
+        if self.cfos_raw is None:
+            return None
+        lo = self.s_cfos_lo.value()
+        hi = self.s_cfos_hi.value()
+        if hi <= lo:
+            return np.zeros((self.img_height, self.img_width), dtype=np.uint8)
+        return np.clip((self.cfos_raw - lo) / (hi - lo) * 255, 0, 255).astype(np.uint8)
 
     # ------------------------------------------------------------------ #
     #  Morphological border computation                                    #
@@ -244,7 +324,6 @@ class ReviewerWindow(QMainWindow):
         return result
 
     def _recompute_border(self):
-        """Update self.border_mask from contour_mask + current UI settings."""
         if self.contour_mask is None:
             return
         if self.mask_type_combo.currentText() == 'Area':
@@ -260,6 +339,19 @@ class ReviewerWindow(QMainWindow):
     #  UI construction                                                     #
     # ------------------------------------------------------------------ #
 
+    @staticmethod
+    def _make_slider(lo, hi, val):
+        s = QSlider(Qt.Horizontal)
+        s.setRange(lo, hi)
+        s.setValue(val)
+        return s
+
+    @staticmethod
+    def _make_val_label(val):
+        lbl = QLabel(str(val))
+        lbl.setFixedWidth(60)
+        return lbl
+
     def _build_ui(self):
         central = QWidget()
         self.setCentralWidget(central)
@@ -269,7 +361,7 @@ class ReviewerWindow(QMainWindow):
 
         # ---- left: image list ---------------------------------------- #
         left_box = QGroupBox("All Images")
-        left_box.setFixedWidth(250)
+        left_box.setFixedWidth(260)
         left_vbox = QVBoxLayout(left_box)
         legend = QLabel(
             '<span style="background:#c8e6c9">&nbsp;&nbsp;</span> random selection&nbsp;&nbsp;'
@@ -284,132 +376,156 @@ class ReviewerWindow(QMainWindow):
         left_vbox.addWidget(self.list_widget)
         outer.addWidget(left_box)
 
-        # ---- right: canvas + controls --------------------------------- #
+        # ---- right: controls ----------------------------------------- #
         right = QWidget()
         right_vbox = QVBoxLayout(right)
-        right_vbox.setContentsMargins(0, 0, 0, 0)
-        right_vbox.setSpacing(2)
+        right_vbox.setContentsMargins(0, 4, 0, 4)
+        right_vbox.setSpacing(8)
 
-        # filename label
         self.filename_label = QLabel("—")
         self.filename_label.setAlignment(Qt.AlignCenter)
-        lf = QFont()
-        lf.setPointSize(9)
-        lf.setBold(True)
+        lf = QFont(); lf.setPointSize(9); lf.setBold(True)
         self.filename_label.setFont(lf)
         self.filename_label.setWordWrap(True)
         right_vbox.addWidget(self.filename_label)
 
-        # matplotlib canvas
-        self.figure = Figure(figsize=(13, 8))
-        self.canvas = FigureCanvas(self.figure)
-        self.canvas.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-        self.canvas.setFocusPolicy(Qt.StrongFocus)
-        self.canvas.mpl_connect('key_press_event', self._on_key)
-        self.canvas.mpl_connect('scroll_event', self._on_scroll)
-        right_vbox.addWidget(self.canvas)
-
-        # --- controls row 1: mask options + sliders ------------------- #
-        row1 = QWidget()
-        r1 = QHBoxLayout(row1)
-        r1.setContentsMargins(6, 2, 6, 2)
-
-        r1.addWidget(QLabel("Mask color:"))
+        # mask controls
+        mask_box = QGroupBox("Mask")
+        mask_layout = QHBoxLayout(mask_box)
+        mask_layout.addWidget(QLabel("Color:"))
         self.color_combo = QComboBox()
         for name in MASK_COLORS:
             self.color_combo.addItem(name)
         self.color_combo.setCurrentText('Green')
         self.color_combo.currentTextChanged.connect(self._on_color_changed)
-        r1.addWidget(self.color_combo)
-
-        r1.addSpacing(12)
-        r1.addWidget(QLabel("Mask type:"))
+        mask_layout.addWidget(self.color_combo)
+        mask_layout.addSpacing(12)
+        mask_layout.addWidget(QLabel("Type:"))
         self.mask_type_combo = QComboBox()
         self.mask_type_combo.addItems(['Outline', 'Area'])
         self.mask_type_combo.currentTextChanged.connect(self._on_mask_type_changed)
-        r1.addWidget(self.mask_type_combo)
-
-        r1.addSpacing(12)
-        r1.addWidget(QLabel("Border width:"))
+        mask_layout.addWidget(self.mask_type_combo)
+        mask_layout.addSpacing(12)
+        mask_layout.addWidget(QLabel("Width:"))
         self.lw_spinbox = QSpinBox()
         self.lw_spinbox.setRange(1, 8)
         self.lw_spinbox.setValue(1)
         self.lw_spinbox.setFixedWidth(50)
-        self.lw_spinbox.setToolTip("Width in pixels of the outline (1 = ~2 px, 8 = ~16 px)")
         self.lw_spinbox.valueChanged.connect(self._on_lw_changed)
-        r1.addWidget(self.lw_spinbox)
+        mask_layout.addWidget(self.lw_spinbox)
+        mask_layout.addStretch()
+        right_vbox.addWidget(mask_box)
 
-        r1.addSpacing(16)
-        r1.addWidget(QLabel("Contrast:"))
+        # ---- display range group ------------------------------------- #
+        range_box = QGroupBox("Display Range (Min / Max)")
+        range_vbox = QVBoxLayout(range_box)
+
+        ch_main = self.main_channel_token or "tdTomato"
+        ch_cfos = self.cfos_channel_token or "cfos"
+
+        # tdTomato Lo
+        self.s_tdt_lo = self._make_slider(0, 255, 0)
+        self.lbl_tdt_lo = self._make_val_label(0)
+        self.s_tdt_lo.valueChanged.connect(self._on_tdt_range)
+        # tdTomato Hi
+        self.s_tdt_hi = self._make_slider(0, 255, 255)
+        self.lbl_tdt_hi = self._make_val_label(255)
+        self.s_tdt_hi.valueChanged.connect(self._on_tdt_range)
+
+        range_vbox.addLayout(
+            _make_range_row(ch_main,
+                            self.s_tdt_lo, self.lbl_tdt_lo,
+                            self.s_tdt_hi, self.lbl_tdt_hi)
+        )
+
+        self.s_cfos_lo = self.s_cfos_hi = None
+        self.lbl_cfos_lo = self.lbl_cfos_hi = None
+        if self.cfos_folder:
+            self.s_cfos_lo = self._make_slider(0, 255, 0)
+            self.lbl_cfos_lo = self._make_val_label(0)
+            self.s_cfos_lo.valueChanged.connect(self._on_cfos_range)
+            self.s_cfos_hi = self._make_slider(0, 255, 255)
+            self.lbl_cfos_hi = self._make_val_label(255)
+            self.s_cfos_hi.valueChanged.connect(self._on_cfos_range)
+            range_vbox.addLayout(
+                _make_range_row(ch_cfos,
+                                self.s_cfos_lo, self.lbl_cfos_lo,
+                                self.s_cfos_hi, self.lbl_cfos_hi)
+            )
+
+        right_vbox.addWidget(range_box)
+
+        # ---- image adjust (contrast / brightness) -------------------- #
+        adj_box = QGroupBox("Image Adjust")
+        adj_layout = QVBoxLayout(adj_box)
+
+        row_c = QHBoxLayout()
+        row_c.addWidget(QLabel("Contrast:"))
         self.s_contrast = QSlider(Qt.Horizontal)
         self.s_contrast.setRange(10, 300)
         self.s_contrast.setValue(100)
-        self.s_contrast.setFixedWidth(150)
         self.lbl_contrast = QLabel("1.00×")
         self.lbl_contrast.setFixedWidth(44)
         self.s_contrast.valueChanged.connect(self._on_slider)
-        r1.addWidget(self.s_contrast)
-        r1.addWidget(self.lbl_contrast)
+        row_c.addWidget(self.s_contrast)
+        row_c.addWidget(self.lbl_contrast)
+        adj_layout.addLayout(row_c)
 
-        r1.addSpacing(16)
-        r1.addWidget(QLabel("Brightness:"))
+        row_b = QHBoxLayout()
+        row_b.addWidget(QLabel("Brightness:"))
         self.s_brightness = QSlider(Qt.Horizontal)
         self.s_brightness.setRange(-100, 100)
         self.s_brightness.setValue(0)
-        self.s_brightness.setFixedWidth(150)
         self.lbl_brightness = QLabel("0")
         self.lbl_brightness.setFixedWidth(30)
         self.s_brightness.valueChanged.connect(self._on_slider)
-        r1.addWidget(self.s_brightness)
-        r1.addWidget(self.lbl_brightness)
+        row_b.addWidget(self.s_brightness)
+        row_b.addWidget(self.lbl_brightness)
+        adj_layout.addLayout(row_b)
 
-        # alpha sliders — only shown when cfos folder is loaded
+        right_vbox.addWidget(adj_box)
+
+        # ---- alpha sliders (only when cfos folder loaded) ------------ #
         self.s_alpha_tdt = self.s_alpha_cfos = None
         self.lbl_alpha_tdt = self.lbl_alpha_cfos = None
         if self.cfos_folder:
-            r1.addSpacing(20)
-            ch_main = self.main_channel_token or "Ch1"
-            ch_cfos = self.cfos_channel_token or "Ch2"
+            alpha_box = QGroupBox("Merge Alpha")
+            alpha_layout = QVBoxLayout(alpha_box)
 
-            r1.addWidget(QLabel(f"{ch_main} α:"))
+            row_t = QHBoxLayout()
+            row_t.addWidget(QLabel(f"{ch_main}:"))
             self.s_alpha_tdt = QSlider(Qt.Horizontal)
             self.s_alpha_tdt.setRange(0, 100)
             self.s_alpha_tdt.setValue(100)
-            self.s_alpha_tdt.setFixedWidth(100)
             self.lbl_alpha_tdt = QLabel("1.00")
             self.lbl_alpha_tdt.setFixedWidth(36)
             self.s_alpha_tdt.valueChanged.connect(self._on_slider)
-            r1.addWidget(self.s_alpha_tdt)
-            r1.addWidget(self.lbl_alpha_tdt)
+            row_t.addWidget(self.s_alpha_tdt)
+            row_t.addWidget(self.lbl_alpha_tdt)
+            alpha_layout.addLayout(row_t)
 
-            r1.addSpacing(8)
-            r1.addWidget(QLabel(f"{ch_cfos} α:"))
+            row_cf = QHBoxLayout()
+            row_cf.addWidget(QLabel(f"{ch_cfos}:"))
             self.s_alpha_cfos = QSlider(Qt.Horizontal)
             self.s_alpha_cfos.setRange(0, 100)
             self.s_alpha_cfos.setValue(100)
-            self.s_alpha_cfos.setFixedWidth(100)
             self.lbl_alpha_cfos = QLabel("1.00")
             self.lbl_alpha_cfos.setFixedWidth(36)
             self.s_alpha_cfos.valueChanged.connect(self._on_slider)
-            r1.addWidget(self.s_alpha_cfos)
-            r1.addWidget(self.lbl_alpha_cfos)
+            row_cf.addWidget(self.s_alpha_cfos)
+            row_cf.addWidget(self.lbl_alpha_cfos)
+            alpha_layout.addLayout(row_cf)
 
-        r1.addStretch()
-        right_vbox.addWidget(row1)
+            right_vbox.addWidget(alpha_box)
 
-        # --- controls row 2: score / keyboard hint -------------------- #
-        row2 = QWidget()
-        r2 = QHBoxLayout(row2)
-        r2.setContentsMargins(6, 0, 6, 2)
         hint = QLabel(
-            "Score: 1=−2  2=−1  3=0  4=+1  5=+2  6=DISCARD   |   "
+            "Score: 1=−2  2=−1  3=0  4=+1  5=+2  6=DISCARD\n"
             "Scroll / i / o = Zoom   r = Reset   Esc = Quit"
         )
         hint.setStyleSheet("color: #1a56db; font-weight: bold;")
-        r2.addWidget(hint)
-        r2.addStretch()
-        right_vbox.addWidget(row2)
-
+        hint.setAlignment(Qt.AlignCenter)
+        right_vbox.addWidget(hint)
+        right_vbox.addStretch()
         outer.addWidget(right)
 
     def _populate_list(self):
@@ -429,144 +545,188 @@ class ReviewerWindow(QMainWindow):
             self.list_widget.addItem(item)
 
     # ------------------------------------------------------------------ #
-    #  Image loading & compositing                                         #
+    #  Image loading & window management                                   #
     # ------------------------------------------------------------------ #
+
+    def _close_all_image_windows(self):
+        for w in self.img_wins.values():
+            w.close()
+        self.img_wins.clear()
+
+    def _set_range_slider(self, s_lo, lbl_lo, s_hi, lbl_hi, raw_min, raw_max):
+        """Update a Lo/Hi slider pair to the raw pixel range without triggering redraws."""
+        for s in (s_lo, s_hi):
+            s.blockSignals(True)
+        s_lo.setRange(raw_min, raw_max)
+        s_hi.setRange(raw_min, raw_max)
+        s_lo.setValue(raw_min)
+        s_hi.setValue(raw_max)
+        lbl_lo.setText(str(raw_min))
+        lbl_hi.setText(str(raw_max))
+        for s in (s_lo, s_hi):
+            s.blockSignals(False)
 
     def _load_image(self, tif_path, jpg_path):
         self.current_tif_path = tif_path
-        self.filename_label.setText(os.path.basename(tif_path))
+        fname = os.path.basename(tif_path)
+        self.filename_label.setText(fname)
+
         try:
-            tif_raw = Image.open(tif_path)
-            # Single-channel fluorescence TIFs carry no colour metadata.
-            # Map pixel values to the red channel so the display matches
-            # the Red LUT used by ImageJ/FIJI.
-            if tif_raw.mode in ('L', 'I', 'F', 'P') or ';' in tif_raw.mode:
-                raw = np.array(tif_raw).astype(np.float32)
-                lo, hi = raw.min(), raw.max()
-                if hi > lo:
-                    gray = ((raw - lo) / (hi - lo) * 255).astype(np.uint8)
-                else:
-                    gray = np.zeros_like(raw, dtype=np.uint8)
-                rgb = np.zeros((gray.shape[0], gray.shape[1], 3), dtype=np.uint8)
-                rgb[:, :, 0] = gray
-                self.original_tif_arr = rgb
-            else:
-                self.original_tif_arr = np.array(tif_raw.convert('RGB'))
+            tif_pil = Image.open(tif_path)
+            self.tdt_raw = self._load_raw(tif_path)
+            self.img_height, self.img_width = self.tdt_raw.shape[:2]
+            self.tdt_raw_min = int(self.tdt_raw.min())
+            self.tdt_raw_max = int(self.tdt_raw.max())
+            self._set_range_slider(
+                self.s_tdt_lo, self.lbl_tdt_lo,
+                self.s_tdt_hi, self.lbl_tdt_hi,
+                self.tdt_raw_min, self.tdt_raw_max,
+            )
 
             jpg_img = Image.open(jpg_path).convert('L')
-            if jpg_img.size != tif_raw.size:
-                jpg_img = jpg_img.resize(tif_raw.size, Image.NEAREST)
+            if jpg_img.size != tif_pil.size:
+                jpg_img = jpg_img.resize(tif_pil.size, Image.NEAREST)
             jpg_arr = np.array(jpg_img)
             self.jpg_arr_gray = jpg_arr
             self.contour_mask = jpg_arr > 127
             self._recompute_border()
-
-            self.img_height, self.img_width = self.original_tif_arr.shape[:2]
         except Exception as e:
-            print(f"Error loading {os.path.basename(tif_path)}: {e}")
+            print(f"Error loading {fname}: {e}")
             return
 
-        # Load matching cfos TIF if second folder is active
-        self.cfos_arr = None
+        # Load cfos
+        self.cfos_raw = None
         cfos_path = self._find_cfos_tif(tif_path)
         if cfos_path:
             try:
-                cfos_gray = self._load_tif_as_gray_norm(cfos_path)
-                if cfos_gray.shape[:2] != (self.img_height, self.img_width):
-                    cfos_pil = Image.fromarray(cfos_gray).resize(
-                        (self.img_width, self.img_height), Image.NEAREST
+                cfos = self._load_raw(cfos_path)
+                if cfos.shape[:2] != (self.img_height, self.img_width):
+                    cfos = np.array(
+                        Image.fromarray(cfos.astype(np.float32)).resize(
+                            (self.img_width, self.img_height), Image.NEAREST
+                        )
                     )
-                    cfos_gray = np.array(cfos_pil)
-                self.cfos_arr = cfos_gray
+                self.cfos_raw = cfos
+                self.cfos_raw_min = int(cfos.min())
+                self.cfos_raw_max = int(cfos.max())
+                if self.s_cfos_lo is not None:
+                    self._set_range_slider(
+                        self.s_cfos_lo, self.lbl_cfos_lo,
+                        self.s_cfos_hi, self.lbl_cfos_hi,
+                        self.cfos_raw_min, self.cfos_raw_max,
+                    )
             except Exception as e:
                 print(f"Error loading cfos {os.path.basename(cfos_path)}: {e}")
         elif self.cfos_folder:
-            print(f"No matching cfos TIF found for {os.path.basename(tif_path)}")
+            print(f"No matching cfos TIF for {fname}")
 
-        self._build_figure()
-        self.canvas.setFocus()
+        self._open_image_windows(fname)
+        self.activateWindow()
+
+    def _open_image_windows(self, fname):
+        self._close_all_image_windows()
+        adjusted, overlay = self._composite()
+        region, hemi = self.extract_metadata(fname)
+        loc = f"{region or '?'} ({hemi or '?'})"
+        ch_main = self.main_channel_token or 'tdTomato'
+        ch_cfos = self.cfos_channel_token or 'cfos'
+
+        screen = QApplication.primaryScreen().availableGeometry()
+        win_w = screen.width()  // 2
+        win_h = screen.height() // 2
+        step = 30
+
+        idx = 0
+        def win(title, img, cmap=None):
+            nonlocal idx
+            w = ImageViewWindow(title, img, self._on_key, cmap=cmap)
+            x = screen.x() + (idx * step) % (screen.width()  // 4)
+            y = screen.y() + (idx * step) % (screen.height() // 4)
+            w.setGeometry(x, y, win_w, win_h)
+            w.show()
+            idx += 1
+            return w
+
+        self.img_wins['overlap'] = win(f"Overlap — {loc} — {fname}", overlay)
+        self.img_wins['jpeg']    = win(f"Prediction Mask — {fname}", self.jpg_arr_gray, cmap='gray')
+        self.img_wins['tif']     = win(f"{ch_main} — {fname}", adjusted)
+
+        if self.cfos_folder and self.cfos_raw is not None:
+            cfos_gray = self._norm_cfos()
+            cfos_rgb = np.zeros((self.img_height, self.img_width, 3), dtype=np.uint8)
+            cfos_rgb[:, :, 1] = cfos_gray
+            merge = self._compute_merge()
+            self.img_wins['cfos']  = win(f"{ch_cfos} — {fname}", cfos_rgb)
+            self.img_wins['merge'] = win(
+                f"Merge ({ch_main}=red  {ch_cfos}=green) — {fname}", merge
+            )
+
+    # ------------------------------------------------------------------ #
+    #  Compositing                                                         #
+    # ------------------------------------------------------------------ #
 
     def _composite(self):
-        """Return (adjusted, overlay) uint8 RGB arrays for the main channel."""
+        """Return (adjusted, overlay) uint8 RGB using current Lo/Hi + contrast/brightness."""
+        gray = self._norm_tdt()
         c = self.s_contrast.value() / 100.0
         b = self.s_brightness.value()
-        adjusted = np.clip(
-            self.original_tif_arr.astype(np.float32) * c + b, 0, 255
-        ).astype(np.uint8)
-        overlay = adjusted.copy()
+        gray_adj = np.clip(gray.astype(np.float32) * c + b, 0, 255).astype(np.uint8)
+
+        rgb = np.zeros((self.img_height, self.img_width, 3), dtype=np.uint8)
+        rgb[:, :, 0] = gray_adj          # red channel → tdTomato
+
+        overlay = rgb.copy()
         r, g, bv = self.mask_color
         overlay[self.border_mask, 0] = r
         overlay[self.border_mask, 1] = g
         overlay[self.border_mask, 2] = bv
-        return adjusted, overlay
+        return rgb, overlay
 
     def _compute_merge(self):
-        """Return a uint8 RGB array with main channel in red, cfos in green."""
-        alpha_tdt = self.s_alpha_tdt.value() / 100.0 if self.s_alpha_tdt else 1.0
+        alpha_tdt  = self.s_alpha_tdt.value()  / 100.0 if self.s_alpha_tdt  else 1.0
         alpha_cfos = self.s_alpha_cfos.value() / 100.0 if self.s_alpha_cfos else 1.0
         merge = np.zeros((self.img_height, self.img_width, 3), dtype=np.float32)
-        tdt_gray = self.original_tif_arr[:, :, 0].astype(np.float32)
-        merge[:, :, 0] = tdt_gray * alpha_tdt
-        if self.cfos_arr is not None:
-            merge[:, :, 1] = self.cfos_arr.astype(np.float32) * alpha_cfos
+        merge[:, :, 0] = self._norm_tdt().astype(np.float32) * alpha_tdt
+        cfos_gray = self._norm_cfos()
+        if cfos_gray is not None:
+            merge[:, :, 1] = cfos_gray.astype(np.float32) * alpha_cfos
         return np.clip(merge, 0, 255).astype(np.uint8)
-
-    def _build_figure(self):
-        self.figure.clear()
-        self.im_merge = None
-
-        has_merge = self.cfos_folder and self.cfos_arr is not None
-        if has_merge:
-            layout = [['overlap', 'merge'], ['jpeg', 'tif']]
-        else:
-            layout = [['overlap', 'jpeg'], ['overlap', 'tif']]
-
-        self.ax_dict = self.figure.subplot_mosaic(layout)
-        self.figure.subplots_adjust(
-            left=0.01, right=0.99, top=0.96, bottom=0.01,
-            wspace=0.08, hspace=0.08,
-        )
-        adjusted, overlay = self._composite()
-
-        self.im_overlap = self.ax_dict['overlap'].imshow(overlay)
-        region, hemi = self.extract_metadata(os.path.basename(self.current_tif_path))
-        self.ax_dict['overlap'].set_title(
-            f"Region: {region or '?'} ({hemi or '?'})",
-            fontsize=11, color='blue', fontweight='bold',
-        )
-        self.ax_dict['overlap'].axis('off')
-
-        self.im_jpeg = self.ax_dict['jpeg'].imshow(self.jpg_arr_gray, cmap='gray')
-        self.ax_dict['jpeg'].set_title("Prediction Mask", fontsize=9)
-        self.ax_dict['jpeg'].axis('off')
-
-        self.im_tif = self.ax_dict['tif'].imshow(adjusted)
-        self.ax_dict['tif'].set_title("Original TIF", fontsize=9)
-        self.ax_dict['tif'].axis('off')
-
-        if has_merge:
-            ch_main = self.main_channel_token or "Ch1"
-            ch_cfos = self.cfos_channel_token or "Ch2"
-            merge_img = self._compute_merge()
-            self.im_merge = self.ax_dict['merge'].imshow(merge_img)
-            self.ax_dict['merge'].set_title(
-                f"Merge  ({ch_main}=red  {ch_cfos}=green)", fontsize=9
-            )
-            self.ax_dict['merge'].axis('off')
-
-        self.canvas.draw()
 
     # ------------------------------------------------------------------ #
     #  Event handlers                                                      #
     # ------------------------------------------------------------------ #
 
-    def _on_list_selection(self, current, _previous):
+    def _on_list_selection(self, current, _):
         if current is None:
             return
         tif_path = current.data(Qt.UserRole)
         jpg_path = current.data(Qt.UserRole + 1)
         if tif_path and jpg_path:
             self._load_image(tif_path, jpg_path)
+
+    def _on_tdt_range(self):
+        """Enforce Lo < Hi then schedule redraw."""
+        lo, hi = self.s_tdt_lo.value(), self.s_tdt_hi.value()
+        if lo >= hi:
+            # push the other slider away
+            if self.sender() is self.s_tdt_lo:
+                self.s_tdt_hi.setValue(lo + 1)
+            else:
+                self.s_tdt_lo.setValue(hi - 1)
+        self.lbl_tdt_lo.setText(str(self.s_tdt_lo.value()))
+        self.lbl_tdt_hi.setText(str(self.s_tdt_hi.value()))
+        self._slider_timer.start(50)
+
+    def _on_cfos_range(self):
+        lo, hi = self.s_cfos_lo.value(), self.s_cfos_hi.value()
+        if lo >= hi:
+            if self.sender() is self.s_cfos_lo:
+                self.s_cfos_hi.setValue(lo + 1)
+            else:
+                self.s_cfos_lo.setValue(hi - 1)
+        self.lbl_cfos_lo.setText(str(self.s_cfos_lo.value()))
+        self.lbl_cfos_hi.setText(str(self.s_cfos_hi.value()))
+        self._slider_timer.start(50)
 
     def _on_slider(self):
         self.lbl_contrast.setText(f"{self.s_contrast.value() / 100:.2f}×")
@@ -578,14 +738,20 @@ class ReviewerWindow(QMainWindow):
         self._slider_timer.start(50)
 
     def _apply_adjustments(self):
-        if self.original_tif_arr is None or self.im_overlap is None:
+        if self.tdt_raw is None or not self.img_wins:
             return
         adjusted, overlay = self._composite()
-        self.im_overlap.set_data(overlay)
-        self.im_tif.set_data(adjusted)
-        if self.im_merge is not None:
-            self.im_merge.set_data(self._compute_merge())
-        self.canvas.draw_idle()
+        if 'overlap' in self.img_wins:
+            self.img_wins['overlap'].update_data(overlay)
+        if 'tif' in self.img_wins:
+            self.img_wins['tif'].update_data(adjusted)
+        if 'cfos' in self.img_wins and self.cfos_raw is not None:
+            cfos_gray = self._norm_cfos()
+            cfos_rgb = np.zeros((self.img_height, self.img_width, 3), dtype=np.uint8)
+            cfos_rgb[:, :, 1] = cfos_gray
+            self.img_wins['cfos'].update_data(cfos_rgb)
+        if 'merge' in self.img_wins:
+            self.img_wins['merge'].update_data(self._compute_merge())
 
     def _on_color_changed(self, name):
         self.mask_color = MASK_COLORS[name]
@@ -607,44 +773,41 @@ class ReviewerWindow(QMainWindow):
             self._record_score(SCORE_MAP[event.key], event.key)
         elif event.key == 'r':
             self._reset_view()
-        elif event.key in ('i', 'o') and self.ax_dict:
+        elif event.key in ('i', 'o') and self.img_wins:
             scale = 1 / 1.2 if event.key == 'i' else 1.2
-            ref = self.ax_dict['overlap']
-            xl, yl = ref.get_xlim(), ref.get_ylim()
-            self._apply_zoom(scale, (xl[0] + xl[1]) / 2, (yl[0] + yl[1]) / 2)
+            cx, cy = self.img_width / 2, self.img_height / 2
+            for w in self.img_wins.values():
+                w.apply_zoom(scale, cx, cy)
         elif event.key == 'escape':
             self.close()
 
-    def _on_scroll(self, event):
-        if not self.ax_dict or event.inaxes not in self.ax_dict.values():
-            return
-        scale = 1 / 1.2 if event.button == 'up' else 1.2
-        self._apply_zoom(scale, event.xdata, event.ydata)
-
-    def _apply_zoom(self, scale, cx, cy):
-        for ax in self.ax_dict.values():
-            xl, yl = ax.get_xlim(), ax.get_ylim()
-            new_w = (xl[1] - xl[0]) * scale
-            new_h = (yl[0] - yl[1]) * scale
-            relx = (xl[1] - cx) / (xl[1] - xl[0])
-            rely = (yl[0] - cy) / (yl[0] - yl[1])
-            ax.set_xlim([cx - new_w * (1 - relx), cx + new_w * relx])
-            ax.set_ylim([cy + new_h * (1 - rely), cy - new_h * rely])
-        self.canvas.draw_idle()
-
     def _reset_view(self):
-        if not self.ax_dict:
-            return
-        for ax in self.ax_dict.values():
-            ax.set_xlim(-0.5, self.img_width - 0.5)
-            ax.set_ylim(self.img_height - 0.5, -0.5)
+        for w in self.img_wins.values():
+            w.reset_zoom()
         self.s_contrast.setValue(100)
         self.s_brightness.setValue(0)
         if self.s_alpha_tdt:
             self.s_alpha_tdt.setValue(100)
         if self.s_alpha_cfos:
             self.s_alpha_cfos.setValue(100)
-        self.canvas.draw_idle()
+        # reset Lo/Hi to full range
+        if self.tdt_raw is not None:
+            self._set_range_slider(
+                self.s_tdt_lo, self.lbl_tdt_lo,
+                self.s_tdt_hi, self.lbl_tdt_hi,
+                self.tdt_raw_min, self.tdt_raw_max,
+            )
+        if self.cfos_raw is not None and self.s_cfos_lo is not None:
+            self._set_range_slider(
+                self.s_cfos_lo, self.lbl_cfos_lo,
+                self.s_cfos_hi, self.lbl_cfos_hi,
+                self.cfos_raw_min, self.cfos_raw_max,
+            )
+        self._apply_adjustments()
+
+    def closeEvent(self, event):
+        self._close_all_image_windows()
+        super().closeEvent(event)
 
     # ------------------------------------------------------------------ #
     #  Scoring & progress                                                  #
@@ -660,12 +823,9 @@ class ReviewerWindow(QMainWindow):
         if existing_idx is not None:
             old_score = self.results[existing_idx]['Score']
             reply = QMessageBox.question(
-                self,
-                "Image Already Scored",
-                f'"{fname}" was already scored as {old_score}.\n\n'
-                f'Overwrite with new score {score}?',
-                QMessageBox.Yes | QMessageBox.No,
-                QMessageBox.No,
+                self, "Image Already Scored",
+                f'"{fname}" was already scored as {old_score}.\n\nOverwrite with {score}?',
+                QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
             )
             if reply != QMessageBox.Yes:
                 return
@@ -701,8 +861,7 @@ class ReviewerWindow(QMainWindow):
                 self.list_widget.setCurrentItem(item)
                 return
         if self.results:
-            print(f"\nAll randomly selected images reviewed. "
-                  f"Total scored: {len(self.results)}")
+            print(f"\nAll randomly selected images reviewed. Total scored: {len(self.results)}")
 
     def _save_progress(self):
         if not self.results:
@@ -732,7 +891,6 @@ class ImageReviewer:
 
         app = QApplication.instance() or QApplication(sys.argv)
 
-        print("Please select the Image Folder in the pop-up...")
         folder_path = QFileDialog.getExistingDirectory(None, "Select Image Folder")
         if not folder_path:
             return
@@ -754,15 +912,12 @@ class ImageReviewer:
         if not rat_name:
             return
 
-        # Optional second folder for cfos channel
         cfos_folder = None
         reply = QMessageBox.question(
-            None,
-            "Optional: Second Channel Folder",
-            "Do you want to load a second folder for the cfos channel?\n"
-            "(Enables a merged overlay panel with adjustable alpha.)",
-            QMessageBox.Yes | QMessageBox.No,
-            QMessageBox.No,
+            None, "Optional: Second Channel Folder",
+            "Load a second folder for the cfos channel?\n"
+            "(Opens extra windows for cfos and merge.)",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
         )
         if reply == QMessageBox.Yes:
             cfos_folder = QFileDialog.getExistingDirectory(None, "Select cfos Folder")
