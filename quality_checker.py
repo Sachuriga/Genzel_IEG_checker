@@ -55,6 +55,15 @@ def detect_rat_names(folder_path):
     return [name for name, _ in counts.most_common()]
 
 
+def _folder_tokens(folder_path, rat_name):
+    """Return set of all underscore-split tokens from TIF filenames in folder."""
+    tokens = set()
+    for p in glob.glob(os.path.join(folder_path, f"*{rat_name}*.tif")):
+        name = os.path.splitext(os.path.basename(p))[0]
+        tokens.update(re.split(r'[_\-\s]+', name))
+    return tokens
+
+
 class RatSelectionDialog(QDialog):
     """Pop-up that lists detected animal names and lets the user pick or type one."""
 
@@ -96,11 +105,20 @@ class RatSelectionDialog(QDialog):
 # ------------------------------------------------------------------ #
 
 class ReviewerWindow(QMainWindow):
-    def __init__(self, folder_path, rat_name, regions_file_path):
+    def __init__(self, folder_path, rat_name, regions_file_path, cfos_folder=None):
         super().__init__()
         self.folder_path = folder_path
         self.rat_name = rat_name
         self.output_path = os.path.join(folder_path, f"{rat_name}_QC_Scores.xlsx")
+
+        # cfos (second channel) state
+        self.cfos_folder = cfos_folder
+        self.cfos_arr = None        # uint8 gray array for current image
+        self.im_merge = None        # matplotlib AxesImage for merge panel
+        self.main_channel_token = None
+        self.cfos_channel_token = None
+        if cfos_folder:
+            self._detect_channel_tokens()
 
         self.results = []
         self.current_tif_path = None
@@ -174,6 +192,36 @@ class ReviewerWindow(QMainWindow):
                     if self._find_jpg(chosen):
                         selected.add(chosen)
         return selected
+
+    def _detect_channel_tokens(self):
+        """Find the unique channel token in each folder by diffing their token sets."""
+        main_tokens = _folder_tokens(self.folder_path, self.rat_name)
+        cfos_tokens = _folder_tokens(self.cfos_folder, self.rat_name)
+        main_unique = main_tokens - cfos_tokens
+        cfos_unique = cfos_tokens - main_tokens
+        # Pick the longest unique token as the channel name (avoids short noise tokens)
+        self.main_channel_token = max(main_unique, key=len) if main_unique else None
+        self.cfos_channel_token = max(cfos_unique, key=len) if cfos_unique else None
+        print(f"Channel tokens detected — main: {self.main_channel_token!r}, cfos: {self.cfos_channel_token!r}")
+
+    def _find_cfos_tif(self, tif_path):
+        """Return the matching cfos TIF path, or None if not found."""
+        if not self.cfos_folder or not self.main_channel_token or not self.cfos_channel_token:
+            return None
+        fname = os.path.basename(tif_path)
+        cfos_fname = fname.replace(self.main_channel_token, self.cfos_channel_token, 1)
+        cfos_path = os.path.join(self.cfos_folder, cfos_fname)
+        return cfos_path if os.path.exists(cfos_path) else None
+
+    @staticmethod
+    def _load_tif_as_gray_norm(path):
+        """Load a TIF and return a uint8 grayscale array normalized to 0-255."""
+        raw_img = Image.open(path)
+        raw = np.array(raw_img).astype(np.float32)
+        lo, hi = raw.min(), raw.max()
+        if hi > lo:
+            return ((raw - lo) / (hi - lo) * 255).astype(np.uint8)
+        return np.zeros(raw.shape[:2], dtype=np.uint8)
 
     # ------------------------------------------------------------------ #
     #  Morphological border computation                                    #
@@ -314,6 +362,38 @@ class ReviewerWindow(QMainWindow):
         self.s_brightness.valueChanged.connect(self._on_slider)
         r1.addWidget(self.s_brightness)
         r1.addWidget(self.lbl_brightness)
+
+        # alpha sliders — only shown when cfos folder is loaded
+        self.s_alpha_tdt = self.s_alpha_cfos = None
+        self.lbl_alpha_tdt = self.lbl_alpha_cfos = None
+        if self.cfos_folder:
+            r1.addSpacing(20)
+            ch_main = self.main_channel_token or "Ch1"
+            ch_cfos = self.cfos_channel_token or "Ch2"
+
+            r1.addWidget(QLabel(f"{ch_main} α:"))
+            self.s_alpha_tdt = QSlider(Qt.Horizontal)
+            self.s_alpha_tdt.setRange(0, 100)
+            self.s_alpha_tdt.setValue(100)
+            self.s_alpha_tdt.setFixedWidth(100)
+            self.lbl_alpha_tdt = QLabel("1.00")
+            self.lbl_alpha_tdt.setFixedWidth(36)
+            self.s_alpha_tdt.valueChanged.connect(self._on_slider)
+            r1.addWidget(self.s_alpha_tdt)
+            r1.addWidget(self.lbl_alpha_tdt)
+
+            r1.addSpacing(8)
+            r1.addWidget(QLabel(f"{ch_cfos} α:"))
+            self.s_alpha_cfos = QSlider(Qt.Horizontal)
+            self.s_alpha_cfos.setRange(0, 100)
+            self.s_alpha_cfos.setValue(100)
+            self.s_alpha_cfos.setFixedWidth(100)
+            self.lbl_alpha_cfos = QLabel("1.00")
+            self.lbl_alpha_cfos.setFixedWidth(36)
+            self.s_alpha_cfos.valueChanged.connect(self._on_slider)
+            r1.addWidget(self.s_alpha_cfos)
+            r1.addWidget(self.lbl_alpha_cfos)
+
         r1.addStretch()
         right_vbox.addWidget(row1)
 
@@ -386,11 +466,28 @@ class ReviewerWindow(QMainWindow):
             print(f"Error loading {os.path.basename(tif_path)}: {e}")
             return
 
+        # Load matching cfos TIF if second folder is active
+        self.cfos_arr = None
+        cfos_path = self._find_cfos_tif(tif_path)
+        if cfos_path:
+            try:
+                cfos_gray = self._load_tif_as_gray_norm(cfos_path)
+                if cfos_gray.shape[:2] != (self.img_height, self.img_width):
+                    cfos_pil = Image.fromarray(cfos_gray).resize(
+                        (self.img_width, self.img_height), Image.NEAREST
+                    )
+                    cfos_gray = np.array(cfos_pil)
+                self.cfos_arr = cfos_gray
+            except Exception as e:
+                print(f"Error loading cfos {os.path.basename(cfos_path)}: {e}")
+        elif self.cfos_folder:
+            print(f"No matching cfos TIF found for {os.path.basename(tif_path)}")
+
         self._build_figure()
         self.canvas.setFocus()
 
     def _composite(self):
-        """Return (adjusted, overlay) uint8 RGB arrays."""
+        """Return (adjusted, overlay) uint8 RGB arrays for the main channel."""
         c = self.s_contrast.value() / 100.0
         b = self.s_brightness.value()
         adjusted = np.clip(
@@ -403,9 +500,27 @@ class ReviewerWindow(QMainWindow):
         overlay[self.border_mask, 2] = bv
         return adjusted, overlay
 
+    def _compute_merge(self):
+        """Return a uint8 RGB array with main channel in red, cfos in green."""
+        alpha_tdt = self.s_alpha_tdt.value() / 100.0 if self.s_alpha_tdt else 1.0
+        alpha_cfos = self.s_alpha_cfos.value() / 100.0 if self.s_alpha_cfos else 1.0
+        merge = np.zeros((self.img_height, self.img_width, 3), dtype=np.float32)
+        tdt_gray = self.original_tif_arr[:, :, 0].astype(np.float32)
+        merge[:, :, 0] = tdt_gray * alpha_tdt
+        if self.cfos_arr is not None:
+            merge[:, :, 1] = self.cfos_arr.astype(np.float32) * alpha_cfos
+        return np.clip(merge, 0, 255).astype(np.uint8)
+
     def _build_figure(self):
         self.figure.clear()
-        layout = [['overlap', 'jpeg'], ['overlap', 'tif']]
+        self.im_merge = None
+
+        has_merge = self.cfos_folder and self.cfos_arr is not None
+        if has_merge:
+            layout = [['overlap', 'merge'], ['jpeg', 'tif']]
+        else:
+            layout = [['overlap', 'jpeg'], ['overlap', 'tif']]
+
         self.ax_dict = self.figure.subplot_mosaic(layout)
         self.figure.subplots_adjust(
             left=0.01, right=0.99, top=0.96, bottom=0.01,
@@ -429,6 +544,16 @@ class ReviewerWindow(QMainWindow):
         self.ax_dict['tif'].set_title("Original TIF", fontsize=9)
         self.ax_dict['tif'].axis('off')
 
+        if has_merge:
+            ch_main = self.main_channel_token or "Ch1"
+            ch_cfos = self.cfos_channel_token or "Ch2"
+            merge_img = self._compute_merge()
+            self.im_merge = self.ax_dict['merge'].imshow(merge_img)
+            self.ax_dict['merge'].set_title(
+                f"Merge  ({ch_main}=red  {ch_cfos}=green)", fontsize=9
+            )
+            self.ax_dict['merge'].axis('off')
+
         self.canvas.draw()
 
     # ------------------------------------------------------------------ #
@@ -446,6 +571,10 @@ class ReviewerWindow(QMainWindow):
     def _on_slider(self):
         self.lbl_contrast.setText(f"{self.s_contrast.value() / 100:.2f}×")
         self.lbl_brightness.setText(str(self.s_brightness.value()))
+        if self.lbl_alpha_tdt:
+            self.lbl_alpha_tdt.setText(f"{self.s_alpha_tdt.value() / 100:.2f}")
+        if self.lbl_alpha_cfos:
+            self.lbl_alpha_cfos.setText(f"{self.s_alpha_cfos.value() / 100:.2f}")
         self._slider_timer.start(50)
 
     def _apply_adjustments(self):
@@ -454,6 +583,8 @@ class ReviewerWindow(QMainWindow):
         adjusted, overlay = self._composite()
         self.im_overlap.set_data(overlay)
         self.im_tif.set_data(adjusted)
+        if self.im_merge is not None:
+            self.im_merge.set_data(self._compute_merge())
         self.canvas.draw_idle()
 
     def _on_color_changed(self, name):
@@ -509,6 +640,10 @@ class ReviewerWindow(QMainWindow):
             ax.set_ylim(self.img_height - 0.5, -0.5)
         self.s_contrast.setValue(100)
         self.s_brightness.setValue(0)
+        if self.s_alpha_tdt:
+            self.s_alpha_tdt.setValue(100)
+        if self.s_alpha_cfos:
+            self.s_alpha_cfos.setValue(100)
         self.canvas.draw_idle()
 
     # ------------------------------------------------------------------ #
@@ -619,7 +754,22 @@ class ImageReviewer:
         if not rat_name:
             return
 
-        window = ReviewerWindow(folder_path, rat_name, regions_file)
+        # Optional second folder for cfos channel
+        cfos_folder = None
+        reply = QMessageBox.question(
+            None,
+            "Optional: Second Channel Folder",
+            "Do you want to load a second folder for the cfos channel?\n"
+            "(Enables a merged overlay panel with adjustable alpha.)",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if reply == QMessageBox.Yes:
+            cfos_folder = QFileDialog.getExistingDirectory(None, "Select cfos Folder")
+            if not cfos_folder:
+                cfos_folder = None
+
+        window = ReviewerWindow(folder_path, rat_name, regions_file, cfos_folder=cfos_folder)
         window.show()
         sys.exit(app.exec_())
 
