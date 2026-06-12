@@ -1,14 +1,16 @@
 # Genzel IEG Checker
 
-An interactive GUI tool for quality control (QC) scoring of neuroscience brain region images. Researchers visually inspect segmentation prediction masks overlaid on original tissue scans and assign quality scores, which are saved to an Excel file.
+An interactive GUI tool for quality control (QC) scoring of fluorescence brain section images. Researchers visually inspect segmentation prediction masks overlaid on original tissue scans, optionally compare two channels side-by-side, and assign quality scores saved to an Excel file.
 
 ---
 
 ## What It Does
 
-The tool loads pairs of images — an original TIF brain scan and its corresponding JPEG prediction mask — and displays them side-by-side with an overlay. The reviewer scores each image using keyboard shortcuts. Results accumulate in an Excel file, saved incrementally after each score.
+The tool loads pairs of images — an original TIF brain scan and its corresponding JPEG prediction mask — and opens each panel in its own floating window. The reviewer scores each image using keyboard shortcuts. Results accumulate in an Excel file, saved incrementally after each score.
 
 One image is randomly sampled per brain region per hemisphere (left/right), so the reviewer sees a representative cross-section rather than every image in the folder.
+
+Optionally, a second folder containing a second fluorescence channel (e.g. cfos) can be loaded alongside the first (e.g. tdTomato). This enables a per-channel display range control and a merged overlay window.
 
 ---
 
@@ -22,7 +24,7 @@ Install dependencies:
 pip install -r requirements.txt
 ```
 
-Key packages used: `PyQt5`, `matplotlib`, `Pillow`, `pandas`, `openpyxl`, `numpy`.
+Key packages: `PyQt5`, `matplotlib`, `Pillow`, `pandas`, `openpyxl`, `numpy`.
 
 ---
 
@@ -32,88 +34,116 @@ Key packages used: `PyQt5`, `matplotlib`, `Pillow`, `pandas`, `openpyxl`, `numpy
 python quality_checker.py
 ```
 
-On launch, two dialogs appear:
+On launch, a sequence of dialogs appears:
 
-1. **Select folder** — choose the folder containing your TIF images and JPEG prediction masks.
-2. **Enter Rat ID** — type the rat identifier (e.g. `Rat461707`). This is used to filter files by name and label the output file.
+1. **Select image folder** — the folder containing TIF images and JPEG prediction masks.
+2. **Select animal** — detected animal IDs are listed; pick one or type manually.
+3. **Optional: second channel folder** — choose a cfos folder to enable the merge view (or skip).
+4. If yes: **Select cfos folder** — the folder containing the matching cfos TIF files.
 
 ---
 
 ## File Naming Conventions
 
-The tool discovers files using these patterns:
-
-**TIF images** (original scans):
+### TIF images (main channel, e.g. tdTomato)
 ```
-*{RatID}*.tif
+OS_TRAP_m464102_tdTomato_Parietal_1-6_20x_HPC-DG_RH.tif
 ```
 
-**JPEG prediction masks** (must share the same base name):
+### TIF images (second channel, e.g. cfos)
+```
+OS_TRAP_m464102_cfos_Parietal_1-6_20x_HPC-DG_RH.tif
+```
+
+The tool automatically detects which token differs between the two folders (e.g. `tdTomato` vs `cfos`) and uses it to match corresponding files across folders.
+
+### JPEG prediction masks
 ```
 {base_name}_Object Predictions.jpeg
 {base_name}_Object Predictions.jpg
 ```
 
-**Region and hemisphere** are extracted from the filename by splitting on `_`, `-`, and spaces, then matching tokens against the list in `Regions.xlsx`. The tool looks for `RH` or `LH` tokens to identify the hemisphere.
+**Region** and **hemisphere** are extracted from the filename by splitting on `_`, `-`, and spaces, then matching tokens against `Regions.xlsx`. `RH` or `LH` tokens identify the hemisphere.
 
 ---
 
 ## Regions.xlsx
 
-This file contains the list of valid brain region names (one per row, column A). Regions are matched against filename tokens. Longer region names take priority over shorter ones to prefer specific matches (e.g. `vlORB` over `ORB`).
+Contains valid brain region names (one per row, column A). Longer names take priority over shorter ones (e.g. `vlORB` over `ORB`).
 
-Do not rename this file — the tool expects it in the same directory as `quality_checker.py`.
+Must be in the same directory as `quality_checker.py`.
 
 ---
 
-## The Review Interface
+## Windows
 
-The matplotlib window shows three panels:
+Each panel opens in its own resizable floating window (default size: half the screen width × half the screen height, cascaded with 30 px offsets). When a new image is selected from the list, all windows close and a fresh set opens.
 
-| Panel | Contents |
-|-------|----------|
-| **Overlap** (large, left) | Original TIF with red contour of the prediction mask overlaid |
-| **Prediction** (top right) | Grayscale prediction mask alone |
-| **Original** (bottom right) | Original TIF image |
+### Without cfos folder (3 windows)
 
-The title bar displays the region name, hemisphere, score legend, and available controls.
+| Window | Contents |
+|--------|----------|
+| **Overlap** | tdTomato TIF with prediction mask contour overlaid |
+| **Prediction Mask** | Grayscale JPEG mask alone |
+| **tdTomato** | Original TIF, adjusted by display range + contrast/brightness |
+
+### With cfos folder (5 windows)
+
+| Window | Contents |
+|--------|----------|
+| **Overlap** | tdTomato TIF with prediction mask contour overlaid |
+| **Prediction Mask** | Grayscale JPEG mask alone |
+| **tdTomato** | tdTomato channel (red) |
+| **cfos** | cfos channel (green) |
+| **Merge** | tdTomato (red) + cfos (green) blended, alpha-adjustable |
+
+Display is normalised per-image to the actual pixel min/max, matching ImageJ's auto-contrast behaviour.
 
 ---
 
 ## Controls
 
-### Scoring (keyboard)
+### Scoring (keyboard, works from any window)
 
 | Key | Score | Meaning |
 |-----|-------|---------|
-| `1` | `-2` | Very poor quality |
-| `2` | `-1` | Poor quality |
+| `1` | `−2` | Very poor quality |
+| `2` | `−1` | Poor quality |
 | `3` | `0` | Acceptable / neutral |
-| `4` | `1` | Good quality |
-| `5` | `2` | Excellent quality |
+| `4` | `+1` | Good quality |
+| `5` | `+2` | Excellent quality |
 | `6` | `DISCARD` | Discard this image |
 
-Pressing a score key immediately records the result and advances to the next image.
+Pressing a score key immediately records the result and advances to the next unscored image. If an image has already been scored, a confirmation dialog appears before overwriting.
 
-### Navigation & View
+### Navigation & zoom (keyboard, works from any window)
 
 | Key / Action | Effect |
 |--------------|--------|
-| `i` | Zoom in (1.2×) |
-| `o` | Zoom out (1.2×) |
-| Scroll wheel | Zoom in/out at cursor position |
-| `r` | Reset zoom and sliders to defaults |
+| `i` | Zoom in 1.2× (all windows simultaneously) |
+| `o` | Zoom out 1.2× (all windows simultaneously) |
+| Scroll wheel | Zoom in/out at cursor position (that window only) |
+| `r` | Reset zoom, display range, contrast, brightness, and alpha to defaults |
 | `Escape` | Exit the application |
 
-### Sliders
+### Control panel sliders
 
-- **Contrast** — range 0.1 to 3.0 (applied as a multiplier)
-- **Brightness** — range −100 to +100 (applied as an offset)
+**Display Range (Min / Max)**
 
-Adjustments apply in real-time to the Overlap and Original panels using:
+Sets the black point (Lo) and white point (Hi) using actual pixel values from the raw TIF. Equivalent to ImageJ's Brightness/Contrast sliders. Each channel has its own Lo/Hi pair; the range is automatically initialised to the image's actual pixel min and max when a new image loads.
+
+**Image Adjust**
+
+- **Contrast** — multiplier applied after display-range normalisation (0.1 × to 3.0 ×)
+- **Brightness** — offset applied after contrast (−100 to +100)
+
 ```
-output = clamp(input × contrast + brightness, 0, 255)
+output = clamp(normalised × contrast + brightness, 0, 255)
 ```
+
+**Merge Alpha** *(visible only when cfos folder is loaded)*
+
+- One slider per channel (0–1), controlling how strongly each channel contributes to the Merge window.
 
 ---
 
@@ -122,56 +152,58 @@ output = clamp(input × contrast + brightness, 0, 255)
 Results are saved to:
 
 ```
-{input_folder}/{RatID}_QC_Scores.xlsx
+{input_folder}/{AnimalID}_QC_Scores.xlsx
 ```
 
-The file is updated after every scored image (incremental save), so partial progress is not lost if the tool is closed early.
+The file is updated after every scored image so partial progress is never lost.
 
 ### Output columns
 
 | Column | Description |
 |--------|-------------|
 | `Filename` | Original TIF filename |
-| `Rat_ID` | Rat identifier entered at startup |
+| `Rat_ID` | Animal identifier selected at startup |
 | `Region` | Brain region extracted from filename |
 | `Hemisphere` | `LH` or `RH` |
 | `Score` | Numeric score (−2 to 2) or `DISCARD` |
-| `Raw_Input` | Keyboard key that was pressed (`1`–`6`) |
+| `Raw_Input` | Keyboard key pressed (`1`–`6`) |
 
 ---
 
 ## Sampling Strategy
 
-To avoid reviewing every image in large datasets, the tool groups files by **(Region, Hemisphere)** and randomly selects **one image per group**. This ensures:
+Files are grouped by **(Region, Hemisphere)** and one image is randomly selected per group. This ensures:
 
 - Coverage across all regions and both hemispheres
 - A manageable number of images per session
-- Representative sampling if multiple images exist per group
+- Representative sampling when multiple slices exist per group
 
----
-
-## Debugging
-
-`debug.py` is a standalone diagnostic script for troubleshooting filename parsing and sampling logic. Edit the hardcoded paths at lines 8–9 to point at your folder and rat ID, then run:
-
-```bash
-python debug.py
-```
-
-It prints token indices from an example filename, verifies hemisphere extraction, and simulates the grouping and sampling logic without opening the GUI.
+Images without a matching JPEG prediction mask are shown in grey in the list and cannot be selected.
 
 ---
 
 ## Workflow Summary
 
 ```
-1. Launch → select folder → enter Rat ID
-2. Tool finds all *{RatID}*.tif files
-3. Filenames are parsed for region and hemisphere
-4. One TIF + matching JPEG pair sampled per (region, hemisphere)
-5. For each pair:
-     - Display 3-panel view with overlay
-     - Adjust contrast/brightness/zoom as needed
-     - Press 1–6 to score → auto-advances
-6. Results written to {RatID}_QC_Scores.xlsx
+1. Launch → select image folder → select animal ID
+2. Optionally select cfos folder
+3. Tool finds all *{AnimalID}*.tif files, groups by region/hemisphere,
+   randomly picks one per group
+4. For each selected image:
+     a. All panel windows open (3 or 5 depending on cfos)
+     b. Adjust display range / contrast / brightness / zoom as needed
+     c. Press 1–6 to score → windows close, next image opens
+5. Results written to {AnimalID}_QC_Scores.xlsx after each score
 ```
+
+---
+
+## Debugging
+
+`debug.py` is a standalone diagnostic script for troubleshooting filename parsing and sampling logic. Edit the hardcoded paths at lines 8–9 to point at your folder and animal ID, then run:
+
+```bash
+python debug.py
+```
+
+It prints token indices from an example filename, verifies hemisphere extraction, and simulates the grouping and sampling logic without opening the GUI.
